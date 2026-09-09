@@ -1,0 +1,11 @@
+.env
+*.pyc
+lastfm_data.db
+myenv/
+state.json
+local_db_data/
+gotoenv
+logs/
+config/airflow.cfg
+__pycache__/
+http_cache.sqlite
