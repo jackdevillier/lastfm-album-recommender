@@ -14,6 +14,8 @@ load_dotenv(".env")
 USER_AGENT = os.getenv('USER_AGENT')
 API_KEY = os.getenv("API_KEY")
 client = LastFM(USER_AGENT, API_KEY)
+sim = client.get_track_info("Cry For Me", "Magdalena Bay")
+print(sim)
 
 def fmt_tags(tags: list[dict]) -> list[str]:
     res = []
