@@ -38,27 +38,31 @@ sim score changes when two songs of the same album are recommended from two song
 - counter: to prioritize "hits", reward the candidate album with higher score based on the amount of hits it has
 boost_multiplier = 1 + boost_factor * min(hit_count - 1, max_hits_considered=5)
 
+checked flag: since similar songs is "objective" and rather immutable in the eyes of last.fm, we can "check off" a track in the scrobbles table? needs to 
+
 '''
 import sqlite3
 import os
 from dotenv import load_dotenv
 from pylastfmapi.client import LastFM
-
+from scrobble_puller import pull_scrobbles
+import datetime
+import json
 load_dotenv(".env")
-USER_AGENT = os.getenv('USER_AGENT')
-API_KEY = os.getenv("API_KEY")
-fm = LastFM(USER_AGENT, API_KEY)
+
+fm = LastFM(os.getenv('USER_AGENT'), os.getenv("API_KEY"))
 
 con = sqlite3.connect("lastfm_data.db")
 db = con.cursor()
 
-ref_dict = {}
-cand_dict = {}
+# ref_dict = {}
+# cand_dict = {}
 
 sql_queries = {
     'get_top_track':            """SELECT artist_name, track_name, COUNT(*) as plays
                                     FROM scrobbles
                                     WHERE album_name = ?
+                                    AND artist_name = ?
                                     GROUP BY artist_name, track_name
                                     ORDER BY plays DESC
                                     LIMIT 1""",
@@ -72,32 +76,28 @@ sql_queries = {
                                     AND artist_name = ?""",
     'insert_to_cache':          """INSERT OR IGNORE 
                                     INTO similar_cache (track_name, artist_name, album_name)
-                                    VALUES (?, ?, ?)"""}
+                                    VALUES (?, ?, ?)""",
+    'remove_from_cache':        """DELETE FROM similar_cache
+                                    WHERE track_name = ?
+                                    AND artist_name = ?
+                                    AND album_name = ?""",
+    'albums_by_plays':          """SELECT album_name, artist_name, COUNT(*) as play_count, MAX(date) as last_scrobbled
+                                    FROM scrobbles
+                                    WHERE play_count > 4
+                                    GROUP BY album_name
+                                    ORDER BY play_count DESC"""
+    # 'albums_by_date':           """SELECT album_name, artist_name, MAX(date) as last_scrobbled
+    #                                 FROM scrobbles
+    #                                 GROUP"""
+}
 
-# open graph storage files; TODO: handle file creation
+'''
+go through ref table and update the playcount of each album/row
+'''
 
-# ref_dict file
-# with open() as ref_fd:
-
-
-# cand_dict file
-# with open("") as cand_fd:
-
-def pull_ref_table() -> dict:
-    return None
-
-def pull_cand_table() -> dict:
-    return None
-
-def pull_edge_table() -> dict:
-    return None
-
-def pull_graph_from_db() -> list[dict]:
-    return None
-
-def get_similar_albums(ref_album: str, num_albums: int) -> list[str]:
+def get_similar_albums(ref_album: str, ref_artist: str, num_albums: int) -> list[str]:
     # find the top played track from that album
-    db.execute(sql_queries['get_top_track'], (ref_album,))
+    db.execute(sql_queries['get_top_track'], (ref_album, ref_artist,))
     top_track = db.fetchall()[0]
     
     # get similar tracks to that track
@@ -115,8 +115,12 @@ def get_similar_albums(ref_album: str, num_albums: int) -> list[str]:
 
             # check if track is in scrobbles
             db.execute(sql_queries['find_album_scrobbles'], (track_name, track_artist,))
-            if len(db.fetchall()) > 0:
+            scrobbled_track = db.fetchall()
+            if len(scrobbled_track) > 0:
                 # we have already listened to this album (or at least the track on that album. we can revisit this feature later)
+
+                # TODO: remove track from similar track cache
+                db.execute(sql_queries['remove_from_cache'], (track_name, track_artist, scrobbled_track[0][0]))
                 continue
 
             # check if track is in unfamiliar cache
@@ -124,7 +128,6 @@ def get_similar_albums(ref_album: str, num_albums: int) -> list[str]:
             cached_tracks = db.fetchall()
             if len(cached_tracks) > 0:
                 # track is in unfamiliar cache.
-                print(cached_tracks)
                 res.append(cached_tracks[0][0])
             else:
                 # track is not in cached track table. call get_track_info endpoint and get album
@@ -132,14 +135,30 @@ def get_similar_albums(ref_album: str, num_albums: int) -> list[str]:
                 res.append(track['album']['title'])
                 # update unfamiliar tracks cache
                 db.execute(sql_queries['insert_to_cache'], (track_name, track_artist, track['album']['title']))
-                con.commit()
             count += 1
         else:
             break
-    
+    con.commit()
     return res
 
-def find_similar_album() -> str:
-    return None
 
-print(get_similar_albums("In Rainbows", 3))
+def build_recs():
+    # check state for whether we need to generate a new album
+    latest_pull_date = ""
+    try:
+        with open("state.json", 'r') as fd:
+            latest_pull_date = datetime.date.fromisoformat(json.load(fd)['latest_pull'])
+    except FileNotFoundError:
+        # create new datetime
+        latest_pull_date = datetime.date.today() - datetime.timedelta(days=365)
+        with open("state.json", 'x') as fd:
+            fd.write(json.dumps({"latest_pull": latest_pull_date.isoformat()}))
+    new_enddate = pull_scrobbles(latest_pull_date)
+
+    # get playcounts
+    db.execute()
+
+    # outcome: write new rec list to a json file (recs.json)
+
+    return
+build_recs()
