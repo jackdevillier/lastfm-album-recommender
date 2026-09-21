@@ -48,15 +48,13 @@ from pylastfmapi.client import LastFM
 from scrobble_puller import pull_scrobbles
 import datetime
 import json
-load_dotenv(".env")
+import math
+import bisect
+import random
 
-fm = LastFM(os.getenv('USER_AGENT'), os.getenv("API_KEY"))
-
-con = sqlite3.connect("lastfm_data.db")
-db = con.cursor()
-
-# ref_dict = {}
-# cand_dict = {}
+def open_lastfm_client() -> LastFM:
+    load_dotenv(".env")
+    return LastFM(os.getenv('USER_AGENT'), os.getenv("API_KEY"))
 
 sql_queries = {
     'get_top_track':            """SELECT artist_name, track_name, COUNT(*) as plays
@@ -95,7 +93,7 @@ sql_queries = {
 go through ref table and update the playcount of each album/row
 '''
 
-def get_similar_albums(ref_album: str, ref_artist: str, num_albums: int) -> list[str]:
+def get_similar_albums(ref_album: str, ref_artist: str, num_albums: int, con) -> list[str]:
     # find the top played track from that album
     db.execute(sql_queries['get_top_track'], (ref_album, ref_artist,))
     top_track = db.fetchall()[0]
@@ -141,8 +139,7 @@ def get_similar_albums(ref_album: str, ref_artist: str, num_albums: int) -> list
     con.commit()
     return res
 
-
-def build_recs():
+def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
     # check state for whether we need to generate a new album
     latest_pull_date = ""
     try:
@@ -153,12 +150,87 @@ def build_recs():
         latest_pull_date = datetime.date.today() - datetime.timedelta(days=365)
         with open("state.json", 'x') as fd:
             fd.write(json.dumps({"latest_pull": latest_pull_date.isoformat()}))
-    new_enddate = pull_scrobbles(latest_pull_date)
+    new_enddate = pull_scrobbles(latest_pull_date, fm, con, db)
 
-    # get playcounts
-    db.execute()
+    # TODO: update cand and cand_cache for albums that have now been listened to, in order to remove them from the rec list
+
+    # get playcounts, latest date for calculations
+    db.execute("""SELECT artist_name, album_name, COUNT(*) as play_count, MAX(date) as last_scrobbled
+                        FROM scrobbles 
+                        GROUP BY artist_name, album_name 
+                        HAVING play_count > 4
+                        ORDER BY play_count DESC""")
+
+    # create weights for each album based on PC and recency
+    scrobbled_albums = db.fetchall()
+    if len(scrobbled_albums) == 0:
+        print("No scrobbles in scrobble table.")
+        exit()
+
+    # log transform the max playcount so we can run it against every other playcount and normalize them on a fairer scale
+    lt_max_pcount = math.log(scrobbled_albums[0][2] + 1)
+    weights = {}
+    summed_weights = []
+    curr_sum = 0
+
+    for a in range(len(scrobbled_albums)):
+        album = scrobbled_albums[a]
+        pcount = album[2]
+
+        # log transform and normalize playcount
+        lt_pcount = math.log(pcount + 1)
+        norm_pcount = lt_pcount / lt_max_pcount
+
+        # pull date
+        last_played_date = datetime.date.fromisoformat(album[3])
+        days_since = (datetime.date.today() - last_played_date).days
+
+        # date multiplier (A * exp(-k * (x - 1)) + C), A = 1.2, C = 0.2:
+        # no threshold: do nothing (no recency multiplier)
+        # 90-day threshold: k = 0.0045558
+        # 30-day threshold: k = 0.0138
+        # 14-day threshold: k = 0.0312
+        #  7-day threshold: k = 0.0675 (default)
+        recency_multiplier = 1.2 * math.exp(-0.0675 * (days_since - 1)) + 0.2
+
+        # compute and store in weights hash
+        final_weight = norm_pcount * recency_multiplier
+        weights[a] = [album[0], album[1], final_weight]
+        curr_sum += final_weight
+        summed_weights.append(curr_sum)
+
+    def binary(arr, target, left, right):
+        return bisect.bisect(arr, target)
+
+    rand_max = curr_sum
+    # now, given the amount of tracks to run (say, 25), generate a random float number between 0 and rand_max and find the album attributed to the weight at that location
+    num_track_runs = 25
+    for i in range(num_track_runs):
+        rand_album = weights[bisect.bisect(summed_weights, random.random() * rand_max)]
+        get_similar_albums(rand_album[1], rand_album[0], num_albums=5)
+        
+        
+
+
+
+    # given a user specified amount of new tracks to add to the graph, run down each track and figure out the amount of 
 
     # outcome: write new rec list to a json file (recs.json)
 
     return
-build_recs()
+
+
+def main():
+    fm = open_lastfm_client()
+    con = sqlite3.connect("lastfm_data.db")
+    db = con.cursor()
+
+    arr = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5]
+    binary(arr, 1.6, 0, len(arr) - 1)
+
+    # build_recs(fm, con, db)
+
+
+
+if __name__ == "__main__":
+    main()

@@ -9,7 +9,7 @@ import json
 import math
 import sqlite3
 
-def pull_scrobbles(latest_pull_date) -> datetime.date:
+def pull_scrobbles(latest_pull_date, client: LastFM, con: sqlite3.Connection, cur: sqlite3.Cursor) -> datetime.date:
     load_dotenv(".env")
     USER_AGENT = os.getenv('USER_AGENT')
     API_KEY = os.getenv("API_KEY")

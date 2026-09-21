@@ -66,16 +66,17 @@ sql_queries = [
     """CREATE TABLE IF NOT EXISTS ref_cache (
             track_name TEXT NOT NULL,
             artist_name TEXT NOT NULL,
-            album_name TEXT,
             unique(track_name, artist_name)
         );"""
 ]
 
 # cur.execute("DROP TABLE scrobbles")
+
 # cur.execute("DROP TABLE ref")
-# cur.execute("DROP TABLE cand")
 # cur.execute("DROP TABLE ref_cand")
-# cur.execute("DROP TABLE ref_cache")
+# cur.execute("DROP TABLE cand")
+
+cur.execute("DROP TABLE ref_cache")
 # cur.execute("DROP TABLE cand_cache")
 
 for query in sql_queries:
