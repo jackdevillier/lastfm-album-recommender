@@ -23,7 +23,21 @@ cand_cache: keeps candidate track-to-album relations so we don't have to keep us
 
 '''
 
-sql_queries = [ 
+sql_queries = [
+    """CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            UNIQUE(username)
+        );""",
+    """CREATE TABLE IF NOT EXISTS tappedin (
+            id INTEGER PRIMARY KEY,
+            tapper_id INTEGER,
+            tapped_id INTEGER,
+            FOREIGN KEY(tapper_id) REFERENCES users(id) ON DELETE CASCADE, 
+            FOREIGN KEY(tapped_id) REFERENCES users(id) ON DELETE CASCADE,
+            UNIQUE(tapper_id, tapped_id),
+            CHECK(tapper_id != tapped_id)
+        );""",
     """CREATE TABLE IF NOT EXISTS scrobbles (
             id INTEGER PRIMARY KEY, 
             artist_name TEXT NOT NULL, 
@@ -39,8 +53,6 @@ sql_queries = [
             id INTEGER PRIMARY KEY,
             artist_name TEXT NOT NULL, 
             album_name TEXT,
-            loved BIT,
-            latest_scrobble_date DATE,
             UNIQUE(artist_name, album_name)
         );""",
     """CREATE TABLE IF NOT EXISTS cand (
@@ -54,21 +66,36 @@ sql_queries = [
             cand_id INTEGER,
             sim_sum FLOAT,
             num_hits INTEGER,
-            FOREIGN KEY(ref_id) REFERENCES ref(id), 
-            FOREIGN KEY(cand_id) REFERENCES cand(id)
+            FOREIGN KEY(ref_id) REFERENCES ref(id) ON DELETE CASCADE, 
+            FOREIGN KEY(cand_id) REFERENCES cand(id) ON DELETE CASCADE,
+            UNIQUE(ref_id, cand_id)
         );""",
     """CREATE TABLE IF NOT EXISTS cand_cache (
+            id INTEGER PRIMARY KEY,
             track_name TEXT NOT NULL,
             artist_name TEXT NOT NULL,
             album_name TEXT,
-            UNIQUE(artist_name, track_name, album_name)
+            UNIQUE(track_name, artist_name, album_name)
         );""",
     """CREATE TABLE IF NOT EXISTS ref_cache (
+            id INTEGER PRIMARY KEY,
             track_name TEXT NOT NULL,
             artist_name TEXT NOT NULL,
-            unique(track_name, artist_name)
+            album_name TEXT,
+            UNIQUE(track_name, artist_name, album_name)
+        );""",
+    """CREATE TABLE IF NOT EXISTS cache_jct (
+            r_cache_id INTEGER,
+            c_cache_id INTEGER,
+            sim_score FLOAT NOT NULL,
+            FOREIGN KEY(r_cache_id) REFERENCES ref_cache(id) ON DELETE CASCADE, 
+            FOREIGN KEY(c_cache_id) REFERENCES cand_cache(id) ON DELETE CASCADE,
+            UNIQUE(r_cache_id, c_cache_id)
         );"""
 ]
+
+# cur.execute("DROP TABLE users")
+# cur.execute("DROP TABLE tappedin")
 
 # cur.execute("DROP TABLE scrobbles")
 
@@ -76,8 +103,14 @@ sql_queries = [
 # cur.execute("DROP TABLE ref_cand")
 # cur.execute("DROP TABLE cand")
 
-cur.execute("DROP TABLE ref_cache")
+# cur.execute("DROP TABLE ref_cache")
 # cur.execute("DROP TABLE cand_cache")
+# cur.execute("DROP TABLE cache_jct")
+
 
 for query in sql_queries:
+    print(query)
     cur.execute(query)
+
+con.commit()
+con.close()

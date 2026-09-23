@@ -83,28 +83,41 @@ sql_queries = {
                                     FROM scrobbles
                                     WHERE play_count > 4
                                     GROUP BY album_name
-                                    ORDER BY play_count DESC"""
-    # 'albums_by_date':           """SELECT album_name, artist_name, MAX(date) as last_scrobbled
-    #                                 FROM scrobbles
-    #                                 GROUP"""
+                                    ORDER BY play_count DESC""",
+    'untracked_tracks':         """SELECT DISTINCT s.artist_name, s.track_name
+                                    FROM scrobbles s
+                                    LEFT JOIN ref_cache rc
+                                        ON s.artist_name = rc.artist_name AND s.track_name = rc.track_name
+                                    WHERE rc.id IS NULL;""",
+    'untracked_albums':         """SELECT DISTINCT s.artist_name, s.album_name
+                                    FROM scrobbles s
+                                    LEFT JOIN ref r
+                                        ON s.artist_name = r.artist_name AND s.album_name = r.album_name
+                                    WHERE r.id IS NULL""",
+    'clean_cand':               """DELETE FROM cand
+                                    WHERE id IN (
+                                        SELECT DISTINCT c2.id FROM cand c2
+                                        INNER JOIN scrobbles s
+                                            ON s.artist_name = c2.artist_name AND s.album_name = c2.album_name);""",
+    'clean_cand_cache':         """DELETE FROM cand
+                                    WHERE id IN (
+                                        SELECT DISTINCT c2.id FROM cand c2
+                                        INNER JOIN scrobbles s
+                                            ON s.artist_name = c2.artist_name AND s.album_name = c2.album_name);""",
 }
 
 '''
 go through ref table and update the playcount of each album/row
 '''
 
-def get_similar_albums(ref_album: str, ref_artist: str, num_albums: int, con) -> list[str]:
-    # find the top played track from that album
-    db.execute(sql_queries['get_top_track'], (ref_album, ref_artist,))
-    top_track = db.fetchall()[0]
-    
-    # get similar tracks to that track
-    similar_tracks = fm.get_track_similar(top_track[1], top_track[0], amount=10)
+def get_similar_albums(ref_track: str, ref_artist: str, num_hits: int, fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor) -> list[str]:
+    # call similar tracks endpoint
+    similar_tracks = fm.get_track_similar(ref_track, ref_artist, amount=20)
 
     res = []
     count = 0
     for track in similar_tracks:
-        if count < num_albums:
+        if count < num_hits:
             track_name = track['name']
             track_sim = track['match']
             track_artist = track['artist']['name']
@@ -153,28 +166,25 @@ def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
     new_enddate = pull_scrobbles(latest_pull_date, fm, con, db)
 
     # TODO: update cand and cand_cache for albums that have now been listened to, in order to remove them from the rec list
+    db.execute(sql_queries['clean_cand'])
+    db.execute(sql_queries['clean_cand_cache'])
 
     # get playcounts, latest date for calculations
-    db.execute("""SELECT artist_name, album_name, COUNT(*) as play_count, MAX(date) as last_scrobbled
-                        FROM scrobbles 
-                        GROUP BY artist_name, album_name 
-                        HAVING play_count > 4
-                        ORDER BY play_count DESC""")
+    db.execute(sql_queries['albums_by_plays'])
+    scrobbled_albums = db.fetchall()
 
     # create weights for each album based on PC and recency
-    scrobbled_albums = db.fetchall()
     if len(scrobbled_albums) == 0:
         print("No scrobbles in scrobble table.")
         exit()
 
     # log transform the max playcount so we can run it against every other playcount and normalize them on a fairer scale
     lt_max_pcount = math.log(scrobbled_albums[0][2] + 1)
-    weights = {}
-    summed_weights = []
-    curr_sum = 0
 
-    for a in range(len(scrobbled_albums)):
-        album = scrobbled_albums[a]
+    # key pattern: ["album|artist"]: user_weight 
+    weights = {}
+
+    for album in scrobbled_albums:
         pcount = album[2]
 
         # log transform and normalize playcount
@@ -195,20 +205,25 @@ def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
 
         # compute and store in weights hash
         final_weight = norm_pcount * recency_multiplier
-        weights[a] = [album[0], album[1], final_weight]
-        curr_sum += final_weight
-        summed_weights.append(curr_sum)
+        weights[f'{album[0]}|{album[1]}'] = final_weight
 
-    def binary(arr, target, left, right):
-        return bisect.bisect(arr, target)
 
-    rand_max = curr_sum
-    # now, given the amount of tracks to run (say, 25), generate a random float number between 0 and rand_max and find the album attributed to the weight at that location
-    num_track_runs = 25
-    for i in range(num_track_runs):
-        rand_album = weights[bisect.bisect(summed_weights, random.random() * rand_max)]
-        get_similar_albums(rand_album[1], rand_album[0], num_albums=5)
-        
+    # add new albums 
+    db.execute(sql_queries['untracked_albums'])
+    untracked_albums = db.fetchall()
+    for album in untracked_albums:
+        db.execute(sql_queries["INSERT OR IGNORE INTO ref (artist_name, album_name) VALUES (?, ?)"], (album[0], album[1]))
+
+    # process all untracked tracks into ref_cache and their respective albums in ref
+    db.execute(sql_queries['untracked_tracks'])
+    untracked_tracks = db.fetchall()
+    for track in untracked_tracks:
+
+        # cand table gets built in here
+        get_similar_albums(rand_album[1], rand_album[0], num_hits=5)
+        break
+
+    con.commit()
         
 
 
@@ -225,10 +240,7 @@ def main():
     con = sqlite3.connect("lastfm_data.db")
     db = con.cursor()
 
-    arr = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5]
-    binary(arr, 1.6, 0, len(arr) - 1)
-
-    # build_recs(fm, con, db)
+    build_recs(fm, con, db)
 
 
 
