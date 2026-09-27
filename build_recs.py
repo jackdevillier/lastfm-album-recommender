@@ -68,32 +68,37 @@ sql_queries = {
                                     FROM scrobbles
                                     WHERE track_name = ?
                                     AND artist_name = ?""",
-    'find_album_cache':         """SELECT DISTINCT album_name
-                                    FROM similar_cache
+    'search_cand_cache':        """SELECT DISTINCT id, album_name
+                                    FROM cand_cache
                                     WHERE track_name = ?
                                     AND artist_name = ?""",
-    'insert_to_cache':          """INSERT OR IGNORE 
-                                    INTO similar_cache (track_name, artist_name, album_name)
-                                    VALUES (?, ?, ?)""",
-    'remove_from_cache':        """DELETE FROM similar_cache
-                                    WHERE track_name = ?
-                                    AND artist_name = ?
-                                    AND album_name = ?""",
     'albums_by_plays':          """SELECT album_name, artist_name, COUNT(*) as play_count, MAX(date) as last_scrobbled
                                     FROM scrobbles
                                     WHERE play_count > 4
-                                    GROUP BY album_name
+                                    GROUP BY album_name, artist_name
                                     ORDER BY play_count DESC""",
-    'untracked_tracks':         """SELECT DISTINCT s.artist_name, s.track_name
+    'untracked_tracks':         """SELECT DISTINCT s.artist_name, s.track_name, s.album_name
                                     FROM scrobbles s
                                     LEFT JOIN ref_cache rc
                                         ON s.artist_name = rc.artist_name AND s.track_name = rc.track_name
-                                    WHERE rc.id IS NULL;""",
+                                    WHERE rc.id IS NULL
+                                    AND (s.artist_name, s.album_name) IN (
+                                        SELECT s1.artist_name, s1.album_name 
+                                        FROM scrobbles s1 
+                                        GROUP BY s1.album_name, s1.artist_name 
+                                        HAVING COUNT(*) > 4
+                                    );""",
     'untracked_albums':         """SELECT DISTINCT s.artist_name, s.album_name
                                     FROM scrobbles s
                                     LEFT JOIN ref r
                                         ON s.artist_name = r.artist_name AND s.album_name = r.album_name
-                                    WHERE r.id IS NULL""",
+                                    WHERE r.id IS NULL
+                                    AND (s.artist_name, s.album_name) IN (
+                                        SELECT s1.artist_name, s1.album_name 
+                                        FROM scrobbles s1 
+                                        GROUP BY s1.album_name, s1.artist_name 
+                                        HAVING COUNT(*) > 4
+                                    );""",
     'clean_cand':               """DELETE FROM cand
                                     WHERE id IN (
                                         SELECT DISTINCT c2.id FROM cand c2
@@ -104,52 +109,73 @@ sql_queries = {
                                         SELECT DISTINCT c2.id FROM cand c2
                                         INNER JOIN scrobbles s
                                             ON s.artist_name = c2.artist_name AND s.album_name = c2.album_name);""",
+    'insert_cache_jct':         """INSERT OR IGNORE
+                                    INTO cache_jct (r_cache_id, c_cache_id, sim)
+                                    VALUES (?, ?, ?)""",
+    'insert_to_cand_cache':     """INSERT OR INGORE 
+                                        INTO cand_cache (track_name, artist_name, album_name)
+                                        VALUES (?, ?, ?)""",
+    'insert_to_cand':           """INSERT OR IGNORE
+                                    INTO cand (artist_name, album_name)
+                                    VALUES (?, ?, ?)""",
+    'upsert_to_ref_cand':       """INSERT INTO ref_cand (ref_id, cand_id, sim_sum, num_hits)
+                                    VALUES (?, ?, ?, ?)
+                                    ON CONFLICT(ref_id, cand_id)
+                                    DO UPDATE SET sim_sum=sim"""
 }
 
-'''
-go through ref table and update the playcount of each album/row
-'''
 
-def get_similar_albums(ref_track: str, ref_artist: str, num_hits: int, fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor) -> list[str]:
+'''
+go through ref table and update the playcount of each album/row. currently the assumption is that any ref track entering this function has not been tracked for simlar tracks before
+'''
+def get_similar_albums(ref_track: str, ref_artist: str, ref_album: str, ref_track_id: int, num_hits: int, fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor) -> list[str]:
     # call similar tracks endpoint
     similar_tracks = fm.get_track_similar(ref_track, ref_artist, amount=20)
-
+    ref_album_id = db.execute("SELECT id FROM ref WHERE artist_name = ? AND album_name = ?", (ref_artist, ref_album,))
     res = []
     count = 0
+
+    # update cand when there is a new album
+    # update cand_cache when there is a new track (after a get_track_info call)
+    # update ref_cand when there is a new ref-to-cand album connection (does not mean that any new albums have to be added) OR when cache_jct is updated
+    # update cache_jct for every time a new ref-to-cand track connection (does not mean that any new albums have to be added)
+    #  - this means that as long as the track isn't found in scrobbles then we need to update this and ref_cand accordingly
     for track in similar_tracks:
         if count < num_hits:
-            track_name = track['name']
-            track_sim = track['match']
-            track_artist = track['artist']['name']
+            cand_track_name = track['name']
+            cand_track_sim = track['match']
+            cand_track_artist = track['artist']['name']
 
-            print(f"Current track: {track_name} by {track_artist}")
+            print(f"Current track: {cand_track_name} by {cand_track_artist}")
 
-            # check if track is in scrobbles
-            db.execute(sql_queries['find_album_scrobbles'], (track_name, track_artist,))
+            # check if track is in scrobbles, and return the album if so
+            db.execute(sql_queries['find_album_scrobbles'], (cand_track_name, cand_track_artist,))
             scrobbled_track = db.fetchall()
             if len(scrobbled_track) > 0:
                 # we have already listened to this album (or at least the track on that album. we can revisit this feature later)
-
-                # TODO: remove track from similar track cache
-                db.execute(sql_queries['remove_from_cache'], (track_name, track_artist, scrobbled_track[0][0]))
                 continue
 
-            # check if track is in unfamiliar cache
-            db.execute(sql_queries['find_album_cache'], (track_name, track_artist,))
+            # check if track is in cand_cache
+            db.execute(sql_queries['search_cand_cache'], (cand_track_name, cand_track_artist,))
             cached_tracks = db.fetchall()
             if len(cached_tracks) > 0:
-                # track is in unfamiliar cache.
-                res.append(cached_tracks[0][0])
+                # track is in cand cache we can also assume that the respective album is in cand. insert new cache_jct, update ref_cand with new sim_sum
+                id = cached_tracks[0][0]
+                album_name = cached_tracks[0][1]
+                # insert new relation into cache_jct
+                db.execute(sql_queries['insert_cache_jct'], (ref_track_id, id, cand_track_sim))
+                # try to insert new relation into ref_cand: find id of cand and ref album (you have everything)
+                db.execute("SELECT id FROM cand WHERE artist_name = ? AND album_name = ?", cand_track_artist, album_name)
+                db.execute(sql_queries['upsert_to_ref_cand'])
+
             else:
-                # track is not in cached track table. call get_track_info endpoint and get album
-                track = fm.get_track_info(track_name, track_artist)
-                res.append(track['album']['title'])
-                # update unfamiliar tracks cache
-                db.execute(sql_queries['insert_to_cache'], (track_name, track_artist, track['album']['title']))
+                # track is not in cached track table. call get_track_info endpoint and get album, then update edges
+                track = fm.get_track_info(cand_track_name, cand_track_artist)
+                # update cand cache UPDATE THIS DB CALL
+                db.execute(sql_queries['insert_to_cand_cache'], (cand_track_name, cand_track_artist, track['album']['title']))
             count += 1
         else:
             break
-    con.commit()
     return res
 
 def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
@@ -183,7 +209,6 @@ def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
 
     # key pattern: ["album|artist"]: user_weight 
     weights = {}
-
     for album in scrobbled_albums:
         pcount = album[2]
 
@@ -207,24 +232,22 @@ def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
         final_weight = norm_pcount * recency_multiplier
         weights[f'{album[0]}|{album[1]}'] = final_weight
 
-
-    # add new albums 
+    # process all untracked tracks into ref_cache and their respective albums in ref
     db.execute(sql_queries['untracked_albums'])
     untracked_albums = db.fetchall()
     for album in untracked_albums:
-        db.execute(sql_queries["INSERT OR IGNORE INTO ref (artist_name, album_name) VALUES (?, ?)"], (album[0], album[1]))
+        # update ref
+        db.execute("INSERT OR IGNORE INTO ref (artist_name, album_name) VALUES (?, ?)", (album[0], album[1]))
 
-    # process all untracked tracks into ref_cache and their respective albums in ref
     db.execute(sql_queries['untracked_tracks'])
     untracked_tracks = db.fetchall()
     for track in untracked_tracks:
-
-        # cand table gets built in here
-        get_similar_albums(rand_album[1], rand_album[0], num_hits=5)
+        # function updates cand, ref_cand, cand_cache, and cache_jct
+        db.execute("INSERT OR IGNORE INTO ref_cache (track_name, artist_name, album_name) VALUES (?, ?, ?)", (track[1], track[0], track[2]))
+        get_similar_albums(track[1], track[0], track[2], db.lastrowid, num_hits=5, fm=fm, con=con, db=db)
         break
 
     con.commit()
-        
 
 
 

@@ -103,13 +103,13 @@ sql_queries = [
 # cur.execute("DROP TABLE ref_cand")
 # cur.execute("DROP TABLE cand")
 
-# cur.execute("DROP TABLE ref_cache")
+cur.execute("DROP TABLE ref_cache")
 # cur.execute("DROP TABLE cand_cache")
 # cur.execute("DROP TABLE cache_jct")
 
 
 for query in sql_queries:
-    print(query)
+    # print(query)
     cur.execute(query)
 
 con.commit()
