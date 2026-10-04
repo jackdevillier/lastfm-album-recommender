@@ -12,10 +12,6 @@ c)
 
 BRAINBLAST AREA:
 
-tables I have to make:
-- cached unfamiliar tracks to their albums
-- graph tables (ref and cand and ref_cand junction)
-
 similar album fetch steps:
     - get song from similar tracks API call
     - check scrobble table for song
@@ -39,6 +35,12 @@ sim score changes when two songs of the same album are recommended from two song
 boost_multiplier = 1 + boost_factor * min(hit_count - 1, max_hits_considered=5)
 
 checked flag: since similar songs is "objective" and rather immutable in the eyes of last.fm, we can "check off" a track in the scrobbles table? needs to 
+
+new scoring steps
+for EVERY user:
+ - take playcount, last play date of each ref album >= 5 plays, combine albums and get ref album weights with ref and scrobbles
+    - need to edit the 
+ - 
 
 '''
 import sqlite3
@@ -104,11 +106,8 @@ sql_queries = {
                                         SELECT DISTINCT c2.id FROM cand c2
                                         INNER JOIN scrobbles s
                                             ON s.artist_name = c2.artist_name AND s.album_name = c2.album_name);""",
-    'clean_cand_cache':         """DELETE FROM cand
-                                    WHERE id IN (
-                                        SELECT DISTINCT c2.id FROM cand c2
-                                        INNER JOIN scrobbles s
-                                            ON s.artist_name = c2.artist_name AND s.album_name = c2.album_name);""",
+    'clean_user_graph':        """DELETE FROM user_ref_cand
+                                    WHERE ref_cand_id IN""",
     'insert_cache_jct':         """INSERT OR IGNORE
                                     INTO cache_jct (r_cache_id, c_cache_id, sim)
                                     VALUES (?, ?, ?)""",
@@ -119,9 +118,11 @@ sql_queries = {
                                     INTO cand (artist_name, album_name)
                                     VALUES (?, ?, ?)""",
     'upsert_to_ref_cand':       """INSERT INTO ref_cand (ref_id, cand_id, sim_sum, num_hits)
-                                    VALUES (?, ?, ?, ?)
+                                    VALUES (?, ?, ?, 1)
                                     ON CONFLICT(ref_id, cand_id)
-                                    DO UPDATE SET sim_sum=sim"""
+                                        DO UPDATE SET 
+                                            sim_sum = sim_sum + excluded.sim_sum, 
+                                            num_hits = num_hits + 1"""
 }
 
 
@@ -167,7 +168,6 @@ def get_similar_albums(ref_track: str, ref_artist: str, ref_album: str, ref_trac
                 # try to insert new relation into ref_cand: find id of cand and ref album (you have everything)
                 db.execute("SELECT id FROM cand WHERE artist_name = ? AND album_name = ?", cand_track_artist, album_name)
                 db.execute(sql_queries['upsert_to_ref_cand'])
-
             else:
                 # track is not in cached track table. call get_track_info endpoint and get album, then update edges
                 track = fm.get_track_info(cand_track_name, cand_track_artist)
@@ -179,8 +179,8 @@ def get_similar_albums(ref_track: str, ref_artist: str, ref_album: str, ref_trac
     return res
 
 def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
-    # check state for whether we need to generate a new album
-    latest_pull_date = ""
+    # check state for whether we need to update the graph
+    latest_pull_date = None
     try:
         with open("state.json", 'r') as fd:
             latest_pull_date = datetime.date.fromisoformat(json.load(fd)['latest_pull'])
@@ -189,11 +189,12 @@ def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
         latest_pull_date = datetime.date.today() - datetime.timedelta(days=365)
         with open("state.json", 'x') as fd:
             fd.write(json.dumps({"latest_pull": latest_pull_date.isoformat()}))
-    new_enddate = pull_scrobbles(latest_pull_date, fm, con, db)
 
-    # TODO: update cand and cand_cache for albums that have now been listened to, in order to remove them from the rec list
-    db.execute(sql_queries['clean_cand'])
-    db.execute(sql_queries['clean_cand_cache'])
+    if latest_pull_date == datetime.date.today():
+        # special case where we just need to return the recommendations previously generated today
+        return
+    
+    new_enddate = pull_scrobbles(latest_pull_date, fm, con, db)
 
     # get playcounts, latest date for calculations
     db.execute(sql_queries['albums_by_plays'])
@@ -226,6 +227,7 @@ def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
         # 30-day threshold: k = 0.0138
         # 14-day threshold: k = 0.0312
         #  7-day threshold: k = 0.0675 (default)
+        # k = 0.0675
         recency_multiplier = 1.2 * math.exp(-0.0675 * (days_since - 1)) + 0.2
 
         # compute and store in weights hash

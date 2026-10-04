@@ -40,6 +40,7 @@ sql_queries = [
         );""",
     """CREATE TABLE IF NOT EXISTS scrobbles (
             id INTEGER PRIMARY KEY, 
+            user_id INTEGER,
             artist_name TEXT NOT NULL, 
             track_name TEXT NOT NULL,
             album_name TEXT,
@@ -47,65 +48,119 @@ sql_queries = [
             loved BIT,
             date DATE, 
             time TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
             UNIQUE(date, time, artist_name, track_name)
         );""",
-    """CREATE TABLE IF NOT EXISTS ref (
+    # """CREATE TABLE IF NOT EXISTS ref (
+    #         id INTEGER PRIMARY KEY,
+    #         artist_name TEXT NOT NULL, 
+    #         album_name TEXT,
+    #         UNIQUE(artist_name, album_name)
+    #     );""",
+    # """CREATE TABLE IF NOT EXISTS cand (
+    #         id INTEGER PRIMARY KEY,
+    #         artist_name TEXT NOT NULL,
+    #         album_name TEXT,
+    #         UNIQUE(artist_name, album_name)
+    #     );""",
+    # """CREATE TABLE IF NOT EXISTS ref_cand (
+    #         id INTEGER PRIMARY KEY,
+    #         ref_id INTEGER,
+    #         cand_id INTEGER,
+    #         sim_sum FLOAT,
+    #         num_hits INTEGER,
+    #         FOREIGN KEY(ref_id) REFERENCES ref(id) ON DELETE CASCADE, 
+    #         FOREIGN KEY(cand_id) REFERENCES cand(id) ON DELETE CASCADE,
+    #         UNIQUE(ref_id, cand_id)
+    #     );""",
+    # """CREATE TABLE IF NOT EXISTS user_ref_cand (
+    #         id INTEGER PRIMARY KEY,
+    #         ref_cand_id INTEGER,
+    #         user_id INTEGER,
+    #         sim_sum FLOAT,
+    #         num_hits INTEGER,
+    #         FOREIGN KEY(ref_cand_id) REFERENCES ref_cand(id) ON DELETE CASCADE,
+    #         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    #     );""",
+    # """CREATE TABLE IF NOT EXISTS cand_cache (
+    #         id INTEGER PRIMARY KEY,
+    #         artist_name TEXT NOT NULL,
+    #         track_name TEXT NOT NULL,
+    #         album_name TEXT,
+    #         UNIQUE(track_name, artist_name, album_name)
+    #     );""",
+    # """CREATE TABLE IF NOT EXISTS ref_cache (
+    #         id INTEGER PRIMARY KEY,
+    #         artist_name TEXT NOT NULL,
+    #         track_name TEXT NOT NULL,
+    #         album_name TEXT,
+    #         UNIQUE(track_name, artist_name, album_name)
+    #     );""",
+    # """CREATE TABLE IF NOT EXISTS cache_jct (
+    #         r_cache_id INTEGER,
+    #         c_cache_id INTEGER,
+    #         sim_score FLOAT NOT NULL,
+    #         FOREIGN KEY(r_cache_id) REFERENCES ref_cache(id) ON DELETE CASCADE, 
+    #         FOREIGN KEY(c_cache_id) REFERENCES cand_cache(id) ON DELETE CASCADE,
+    #         UNIQUE(r_cache_id, c_cache_id)
+    #     );""",
+    
+    
+    
+    """CREATE TABLE IF NOT EXISTS albums (
             id INTEGER PRIMARY KEY,
             artist_name TEXT NOT NULL, 
             album_name TEXT,
             UNIQUE(artist_name, album_name)
         );""",
-    """CREATE TABLE IF NOT EXISTS cand (
+    """CREATE TABLE IF NOT EXISTS album_edges (
             id INTEGER PRIMARY KEY,
-            artist_name TEXT NOT NULL,
-            album_name TEXT,
-            UNIQUE(artist_name, album_name)
+            this_album_id INTEGER,
+            that_album_id INTEGER,
+            FOREIGN KEY(this_album_id) REFERENCES ref(id) ON DELETE CASCADE, 
+            FOREIGN KEY(that_album_id) REFERENCES cand(id) ON DELETE CASCADE,
+            UNIQUE(this_album_id, that_album_id)
         );""",
-    """CREATE TABLE IF NOT EXISTS ref_cand (
-            ref_id INTEGER,
-            cand_id INTEGER,
+    """CREATE TABLE IF NOT EXISTS user_album_edge_scores (
+            id INTEGER PRIMARY KEY,
+            album_edge_id INTEGER,
+            user_id INTEGER,
             sim_sum FLOAT,
             num_hits INTEGER,
-            FOREIGN KEY(ref_id) REFERENCES ref(id) ON DELETE CASCADE, 
-            FOREIGN KEY(cand_id) REFERENCES cand(id) ON DELETE CASCADE,
-            UNIQUE(ref_id, cand_id)
+            FOREIGN KEY(album_edge_id) REFERENCES album_edges(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            UNIQUE(album_edge_id, user_id)
         );""",
-    """CREATE TABLE IF NOT EXISTS cand_cache (
+    """CREATE TABLE IF NOT EXISTS tracks (
             id INTEGER PRIMARY KEY,
-            track_name TEXT NOT NULL,
+            album_id INTEGER,
             artist_name TEXT NOT NULL,
-            album_name TEXT,
-            UNIQUE(track_name, artist_name, album_name)
-        );""",
-    """CREATE TABLE IF NOT EXISTS ref_cache (
-            id INTEGER PRIMARY KEY,
             track_name TEXT NOT NULL,
-            artist_name TEXT NOT NULL,
-            album_name TEXT,
-            UNIQUE(track_name, artist_name, album_name)
+            UNIQUE(album_id, artist_name, track_name)
         );""",
-    """CREATE TABLE IF NOT EXISTS cache_jct (
-            r_cache_id INTEGER,
-            c_cache_id INTEGER,
+    """CREATE TABLE IF NOT EXISTS track_edges (
+            this_track_id INTEGER,
+            that_track_id INTEGER,
             sim_score FLOAT NOT NULL,
-            FOREIGN KEY(r_cache_id) REFERENCES ref_cache(id) ON DELETE CASCADE, 
-            FOREIGN KEY(c_cache_id) REFERENCES cand_cache(id) ON DELETE CASCADE,
-            UNIQUE(r_cache_id, c_cache_id)
+            FOREIGN KEY(this_track_id) REFERENCES tracks(id) ON DELETE CASCADE, 
+            FOREIGN KEY(that_track_id) REFERENCES tracks(id) ON DELETE CASCADE,
+            UNIQUE(this_track_id, that_track_id)
         );"""
+    
 ]
 
 # cur.execute("DROP TABLE users")
+cur.execute("DROP TABLE user_ref_cand")
 # cur.execute("DROP TABLE tappedin")
-
 # cur.execute("DROP TABLE scrobbles")
 
-# cur.execute("DROP TABLE ref")
-# cur.execute("DROP TABLE ref_cand")
-# cur.execute("DROP TABLE cand")
+cur.execute("DROP TABLE ref")
+cur.execute("DROP TABLE ref_cand")
+cur.execute("DROP TABLE cand")
 
 cur.execute("DROP TABLE ref_cache")
-# cur.execute("DROP TABLE cand_cache")
-# cur.execute("DROP TABLE cache_jct")
+cur.execute("DROP TABLE cand_cache")
+cur.execute("DROP TABLE cache_jct")
 
 
 for query in sql_queries:
