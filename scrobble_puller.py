@@ -47,10 +47,10 @@ def pull_scrobbles(latest_pull_date, client: LastFM, con: sqlite3.Connection, cu
             formatted_tracks = fmt_recent_tracks(np, curr_day)
             for t in range(len(formatted_tracks) - 1, -1, -1):
                 track = formatted_tracks[t]
-                cur.execute("""INSERT OR IGNORE INTO scrobbles 
-                                (artist_name, track_name, album_name, mbid, loved, date, time)
-                                VALUES (?, ?, ?, ?, ?, ?, ?)""", 
-                            (track['artist_name'], track['track_name'], track['album_name'], track['mbid'], track['loved'], track['date'], track['time']))
+                cur.execute("""INSERT OR IGNORE INTO scrobble 
+                                (user_id, artist_name, track_name, album_name, mbid, loved, date, time)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", 
+                            (1, track['artist_name'], track['track_name'], track['album_name'], track['mbid'], track['loved'], track['date'], track['time']))
             con.commit()
             curr_day += datetime.timedelta(days=min(7, (end - curr_day).days))
             time.sleep(0.3)

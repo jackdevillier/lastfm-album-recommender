@@ -12,19 +12,21 @@ cur = con.cursor()
 TABLE DESCRIPTIONS:
 scrobbles: tracks every scrobble, pulled from the Last.fm API.
 
-Bipartite graph tables:
-ref: holds the left side of the bipartite graph, tracking albums that the user has already listened to and their relevant metrics needed to calculate weights for candidate albums
-cand: holds the right side of the bipartite graph, tracking albums that the user has not listened to but are similar to various reference albums.
-ref_cand: junction table that links ref albums to cand albums, keeping metrics on the similarity score between the two albums.
+album tables:
+album: holds every album, one off, with id
+album_edge: holds relationship between reference and candidate album. many to many
+user_album_edge_score
 
-"Cache" tables:
-ref_cache: track albums that have already been checked for similar tracks. prevents "double hits" from one track to another when calculating similar scores
-cand_cache: keeps candidate track-to-album relations so we don't have to keep using Last.fm API resources to determine the album of a similar track.
+
+track tables:
+track: holds every track, one off, with id and reference to relevant album that the track is on
+track_edge: holds relationship between reference and candidate tracks. many to many
+
 
 '''
 
 sql_queries = [
-    """CREATE TABLE IF NOT EXISTS users (
+    """CREATE TABLE IF NOT EXISTS user (
             id INTEGER PRIMARY KEY,
             username TEXT NOT NULL,
             UNIQUE(username)
@@ -33,12 +35,12 @@ sql_queries = [
             id INTEGER PRIMARY KEY,
             tapper_id INTEGER,
             tapped_id INTEGER,
-            FOREIGN KEY(tapper_id) REFERENCES users(id) ON DELETE CASCADE, 
-            FOREIGN KEY(tapped_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(tapper_id) REFERENCES user(id) ON DELETE CASCADE, 
+            FOREIGN KEY(tapped_id) REFERENCES user(id) ON DELETE CASCADE,
             UNIQUE(tapper_id, tapped_id),
             CHECK(tapper_id != tapped_id)
         );""",
-    """CREATE TABLE IF NOT EXISTS scrobbles (
+    """CREATE TABLE IF NOT EXISTS scrobble (
             id INTEGER PRIMARY KEY, 
             user_id INTEGER,
             artist_name TEXT NOT NULL, 
@@ -48,119 +50,62 @@ sql_queries = [
             loved BIT,
             date DATE, 
             time TEXT,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(user_id) REFERENCES user(id) ON DELETE CASCADE,
             UNIQUE(date, time, artist_name, track_name)
         );""",
-    # """CREATE TABLE IF NOT EXISTS ref (
-    #         id INTEGER PRIMARY KEY,
-    #         artist_name TEXT NOT NULL, 
-    #         album_name TEXT,
-    #         UNIQUE(artist_name, album_name)
-    #     );""",
-    # """CREATE TABLE IF NOT EXISTS cand (
-    #         id INTEGER PRIMARY KEY,
-    #         artist_name TEXT NOT NULL,
-    #         album_name TEXT,
-    #         UNIQUE(artist_name, album_name)
-    #     );""",
-    # """CREATE TABLE IF NOT EXISTS ref_cand (
-    #         id INTEGER PRIMARY KEY,
-    #         ref_id INTEGER,
-    #         cand_id INTEGER,
-    #         sim_sum FLOAT,
-    #         num_hits INTEGER,
-    #         FOREIGN KEY(ref_id) REFERENCES ref(id) ON DELETE CASCADE, 
-    #         FOREIGN KEY(cand_id) REFERENCES cand(id) ON DELETE CASCADE,
-    #         UNIQUE(ref_id, cand_id)
-    #     );""",
-    # """CREATE TABLE IF NOT EXISTS user_ref_cand (
-    #         id INTEGER PRIMARY KEY,
-    #         ref_cand_id INTEGER,
-    #         user_id INTEGER,
-    #         sim_sum FLOAT,
-    #         num_hits INTEGER,
-    #         FOREIGN KEY(ref_cand_id) REFERENCES ref_cand(id) ON DELETE CASCADE,
-    #         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-    #     );""",
-    # """CREATE TABLE IF NOT EXISTS cand_cache (
-    #         id INTEGER PRIMARY KEY,
-    #         artist_name TEXT NOT NULL,
-    #         track_name TEXT NOT NULL,
-    #         album_name TEXT,
-    #         UNIQUE(track_name, artist_name, album_name)
-    #     );""",
-    # """CREATE TABLE IF NOT EXISTS ref_cache (
-    #         id INTEGER PRIMARY KEY,
-    #         artist_name TEXT NOT NULL,
-    #         track_name TEXT NOT NULL,
-    #         album_name TEXT,
-    #         UNIQUE(track_name, artist_name, album_name)
-    #     );""",
-    # """CREATE TABLE IF NOT EXISTS cache_jct (
-    #         r_cache_id INTEGER,
-    #         c_cache_id INTEGER,
-    #         sim_score FLOAT NOT NULL,
-    #         FOREIGN KEY(r_cache_id) REFERENCES ref_cache(id) ON DELETE CASCADE, 
-    #         FOREIGN KEY(c_cache_id) REFERENCES cand_cache(id) ON DELETE CASCADE,
-    #         UNIQUE(r_cache_id, c_cache_id)
-    #     );""",
-    
-    
-    
-    """CREATE TABLE IF NOT EXISTS albums (
+    """CREATE TABLE IF NOT EXISTS album (
             id INTEGER PRIMARY KEY,
             artist_name TEXT NOT NULL, 
             album_name TEXT,
             UNIQUE(artist_name, album_name)
         );""",
-    """CREATE TABLE IF NOT EXISTS album_edges (
+    """CREATE TABLE IF NOT EXISTS album_edge (
             id INTEGER PRIMARY KEY,
-            this_album_id INTEGER,
-            that_album_id INTEGER,
-            FOREIGN KEY(this_album_id) REFERENCES ref(id) ON DELETE CASCADE, 
-            FOREIGN KEY(that_album_id) REFERENCES cand(id) ON DELETE CASCADE,
-            UNIQUE(this_album_id, that_album_id)
+            ref_album_id INTEGER,
+            cand_album_id INTEGER,
+            FOREIGN KEY(ref_album_id) REFERENCES album(id) ON DELETE CASCADE, 
+            FOREIGN KEY(cand_album_id) REFERENCES album(id) ON DELETE CASCADE,
+            UNIQUE(ref_album_id, cand_album_id)
         );""",
-    """CREATE TABLE IF NOT EXISTS user_album_edge_scores (
+    """CREATE TABLE IF NOT EXISTS user_album_edge_score (
             id INTEGER PRIMARY KEY,
             album_edge_id INTEGER,
             user_id INTEGER,
             sim_sum FLOAT,
             num_hits INTEGER,
             FOREIGN KEY(album_edge_id) REFERENCES album_edges(id) ON DELETE CASCADE,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            FOREIGN KEY(user_id) REFERENCES user(id) ON DELETE CASCADE
             UNIQUE(album_edge_id, user_id)
         );""",
-    """CREATE TABLE IF NOT EXISTS tracks (
+    """CREATE TABLE IF NOT EXISTS track (
             id INTEGER PRIMARY KEY,
             album_id INTEGER,
-            artist_name TEXT NOT NULL,
             track_name TEXT NOT NULL,
-            UNIQUE(album_id, artist_name, track_name)
+            FOREIGN KEY(album_id) REFERENCES album(id) ON DELETE CASCADE,
+            UNIQUE(album_id, track_name)
         );""",
-    """CREATE TABLE IF NOT EXISTS track_edges (
-            this_track_id INTEGER,
-            that_track_id INTEGER,
+    """CREATE TABLE IF NOT EXISTS track_edge (
+            ref_track_id INTEGER,
+            cand_track_id INTEGER,
             sim_score FLOAT NOT NULL,
-            FOREIGN KEY(this_track_id) REFERENCES tracks(id) ON DELETE CASCADE, 
-            FOREIGN KEY(that_track_id) REFERENCES tracks(id) ON DELETE CASCADE,
-            UNIQUE(this_track_id, that_track_id)
+            FOREIGN KEY(ref_track_id) REFERENCES track(id) ON DELETE CASCADE, 
+            FOREIGN KEY(cand_track_id) REFERENCES track(id) ON DELETE CASCADE,
+            UNIQUE(ref_track_id, cand_track_id)
         );"""
     
 ]
 
-# cur.execute("DROP TABLE users")
-cur.execute("DROP TABLE user_ref_cand")
+
+
+# cur.execute("DROP TABLE user")
 # cur.execute("DROP TABLE tappedin")
-# cur.execute("DROP TABLE scrobbles")
+# cur.execute("DROP TABLE scrobble")
 
-cur.execute("DROP TABLE ref")
-cur.execute("DROP TABLE ref_cand")
-cur.execute("DROP TABLE cand")
-
-cur.execute("DROP TABLE ref_cache")
-cur.execute("DROP TABLE cand_cache")
-cur.execute("DROP TABLE cache_jct")
+# cur.execute("DROP TABLE album")
+# cur.execute("DROP TABLE track")
+# cur.execute("DROP TABLE album_edge")
+# cur.execute("DROP TABLE track_edge")
+# cur.execute("DROP TABLE user_album_edge_score")
 
 
 for query in sql_queries:
