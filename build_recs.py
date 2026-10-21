@@ -11,6 +11,7 @@ from scrobble_puller import pull_scrobbles
 import datetime
 import json
 import math
+import heapq
 
 def open_lastfm_client() -> LastFM:
     load_dotenv(".env")
@@ -50,7 +51,7 @@ sql_queries = {
                                         FROM scrobble s1 
                                         GROUP BY s1.album_name, s1.artist_name 
                                         HAVING COUNT(*) > 4
-                                    );""",
+                                    );""", # TODO: incorporate user id
     'untracked_albums':         """SELECT DISTINCT s.artist_name, s.album_name
                                     FROM scrobble s
                                     LEFT JOIN album a
@@ -61,7 +62,10 @@ sql_queries = {
                                         FROM scrobble s1 
                                         GROUP BY s1.album_name, s1.artist_name 
                                         HAVING COUNT(*) > 4
-                                    );""",
+                                    );""", # TODO: condense into an insert subquery? we don't use the immediate rowids currently
+    'insert_track':             """INSERT OR IGNORE
+                                    INTO track (track_name, album_id)
+                                    VALUES (?, ?)""", 
     'insert_track_edge':        """INSERT OR IGNORE
                                     INTO track_edge (ref_track_id, cand_track_id, sim_score)
                                     VALUES (?, ?, ?)""",
@@ -77,8 +81,38 @@ sql_queries = {
                                         DO UPDATE SET 
                                             sim_sum = sim_sum + excluded.sim_sum, 
                                             num_hits = num_hits + 1""",
+    'clean_uaes':               """DELETE FROM user_album_edge_score uaes
+                                    WHERE uaes.user_id = ?
+                                    AND id EXISTS (
+                                        SELECT 1 FROM album_edge 
+                                        JOIN album a ON ae.cand_album_id = a.id
+                                        JOIN scrobble s ON a.artist_name = s.artist_name AND a.album_name = s.album_name
+                                        WHERE ae.id = user_album_edge_score.album_edge_id
+                                        AND s.user_id = uaes.user_id
+                                    )""",
+    'all_album_edge_info':      """SELECT ref.album_name AS ref_album, ref.artist_name AS ref_artist, cand.album_name AS cand_album, cand.artist_name AS cand_artist, uaes.sim_sum, uaes.num_hits
+                                    FROM user_album_edge_score uaes
+                                    JOIN album_edge ae ON uaes.album_edge_id = ae.id
+                                    JOIN album ref ON ae.ref_album_id = ref.id
+                                    JOIN album cand ON ae.cand_album_id = cand.id
+                                    WHERE uaes.user_id = ?"""
 }
 
+
+def get_latest_pull_date() -> datetime.date:
+    latest_pull_date = None
+    try:
+        with open("state.json", 'r') as fd:
+            latest_pull_date = datetime.date.fromisoformat(json.load(fd)['latest_pull'])
+    except FileNotFoundError:
+        # create new datetime
+        latest_pull_date = datetime.date.today() - datetime.timedelta(days=365)
+        with open("state.json", 'x') as fd:
+            data = {}
+            data["latest_pull"] = latest_pull_date.isoformat()
+            data["recs"] = []
+            json.dump(data, fd)
+    return latest_pull_date
 
 '''
 go through ref table and update the playcount of each album/row. currently the assumption is that any ref track entering this function has not been tracked for simlar tracks before
@@ -113,32 +147,53 @@ def get_similar_albums(ref_track: str, ref_artist: str, ref_album: str, ref_trac
                 # someone has already listened to this album. TODO: do logic on determining whether the current user has listened to the album and respond accordingly
                 continue
 
-            # check if in track table, and therefore the track's album
+            # check if in track table, and therefore the track's album is in album table
             db.execute(sql_queries['search_tracks'], (cand_track_name, cand_track_artist,))
             cached_tracks = db.fetchall()
             if len(cached_tracks) > 0:
-                # track is in track we can also assume that the respective album is in album. insert new track_edge, update UAES with new sim_sum
-                track_id = cached_tracks[0][0]
-                album_name = cached_tracks[0][1]
-                album_id = cached_tracks[0][2]
-                # insert new relation into track_edge
-                db.execute(sql_queries['insert_track_edge'], (ref_track_id, track_id, cand_track_sim))
+                # cand album is in the system since the cand track is in the track table. we can also assume that the respective album is in album. insert new track_edge, update UAES with new sim_sum
+                cand_track_id = cached_tracks[0][0]
+                cand_album_name = cached_tracks[0][1]
+                cand_album_id = cached_tracks[0][2]
+                # try to insert new relation into track_edge
+                db.execute(sql_queries['insert_track_edge'], (ref_track_id, cand_track_id, cand_track_sim))
                 # try to insert new relation into album_edge: find id of cand and ref album (you have everything)
-                db.execute(sql_queries['insert_album_edge'], (ref_album_id, album_id))
+                db.execute(sql_queries['insert_album_edge'], (ref_album_id, cand_album_id))
+
+                # upsert UAES. we need the edge id of the album edge we just inserted, but if edge was already there, we need to query for it
                 album_edge_id = db.lastrowid
                 if db.rowcount < 1:
-                    db.execute("SELECT id FROM album_edge WHERE ref_album_id = ? AND cand_album_id = ?", (ref_album_id, album_id))
+                    db.execute("SELECT id FROM album_edge WHERE ref_album_id = ? AND cand_album_id = ?", (ref_album_id, cand_album_id))
                     album_edge_id = db.fetchall()[0]
+                # (user_id, album_edge_id, new sim_sum, new num_hits)
                 db.execute(sql_queries['upsert_to_uaes'], (1, album_edge_id, cand_track_sim, 1))
             else:
                 # track is not in track table. call get_track_info endpoint and get album, then update edges
                 track = fm.get_track_info(cand_track_name, cand_track_artist)
 
-                # TODO: check if album is in album table, add if not, then add track with album id
+                # TODO: check if album is in album table, add if not, then add album, and then add track with album id
+                cand_album_name = track['album']['title']
+                db.execute(sql_queries['insert_album'], (cand_track_artist, cand_album_name,))
+                cand_album_id = db.lastrowid
+                if db.rowcount < 1:
+                    db.execute("SELECT id FROM album WHERE album_name = ? AND artist_name = ?", (cand_album_name, cand_track_artist))
+                    cand_album_id = db.fetchall()[0]
 
-                # album_name = 
-                # update cand cache UPDATE THIS DB CALL
-                db.execute(sql_queries['insert_track'], (cand_track_name, track['album']['title']))
+                # insert track with found album_id
+                db.execute(sql_queries['insert_track'], (cand_track_name, cand_album_id))
+                cand_track_id = db.lastrowid
+
+                # insert new relation into track_edge
+                db.execute(sql_queries['insert_track_edge'], (ref_track_id, cand_track_id, cand_track_sim))
+                # try to insert new relation into album_edge: find id of cand and ref album (you have everything)
+                db.execute(sql_queries['insert_album_edge'], (ref_album_id, cand_album_id))
+                album_edge_id = db.lastrowid
+                if db.rowcount < 1:
+                    db.execute("SELECT id FROM album_edge WHERE ref_album_id = ? AND cand_album_id = ?", (ref_album_id, cand_album_id))
+                    album_edge_id = db.fetchall()[0]
+                # update UAES
+                db.execute(sql_queries['upsert_to_uaes'], (1, album_edge_id, cand_track_sim, 1))
+                
             count += 1
         else:
             break
@@ -146,21 +201,16 @@ def get_similar_albums(ref_track: str, ref_artist: str, ref_album: str, ref_trac
 
 def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
     # check state for whether we need to update the graph
-    latest_pull_date = None
-    try:
-        with open("state.json", 'r') as fd:
-            latest_pull_date = datetime.date.fromisoformat(json.load(fd)['latest_pull'])
-    except FileNotFoundError:
-        # create new datetime
-        latest_pull_date = datetime.date.today() - datetime.timedelta(days=365)
-        with open("state.json", 'x') as fd:
-            fd.write(json.dumps({"latest_pull": latest_pull_date.isoformat()}))
+    latest_pull_date = get_latest_pull_date()
 
     if latest_pull_date == datetime.date.today():
-        # special case where we just need to return the recommendations previously generated today
+        # TODO: special case where we just need to return the recommendations previously generated today
         return
     
     new_enddate = pull_scrobbles(latest_pull_date, fm, con, db)
+
+    # clean up uaes (TODO: perform this for every user)
+    db.execute(sql_queries['clean_uaes'], 1)
 
     # get playcounts, latest date for calculations
     db.execute(sql_queries['albums_by_plays'])
@@ -200,7 +250,7 @@ def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
         final_weight = norm_pcount * recency_multiplier
         weights[f'{album[0]}|{album[1]}'] = final_weight
 
-    # process all untracked tracks into ref_cache and their respective albums in ref
+    # process all untracked tracks into track table and their respective albums in album table
     db.execute(sql_queries['untracked_albums'])
     untracked_albums = db.fetchall()
     for album in untracked_albums:
@@ -212,17 +262,46 @@ def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
     for track in untracked_tracks:
         # function updates album, album_edge, user_album_edge_score, track, and track_edge
         db.execute("INSERT OR IGNORE INTO track (track_name, album_id) VALUES (?, ?)", (track[1], track[0]))
-        get_similar_albums(track[1], track[0], track[2], db.lastrowid, num_hits=5, fm=fm, con=con, db=db)
+        get_similar_albums(track[1], track[0], track[2], db.lastrowid, num_hits=10, fm=fm, con=con, db=db)
         break
 
-    con.commit()
+    # with weight list, compile all weights to each candidate album. key: "album|artist", value: [score, array of influence reference albums [[album, artist],...]]
+    summed_cand_weights = {}
 
+    # 0: ref_album, 1: ref_artist, 2: cand_album, 3: cand_artist, 4: sim_sum, 5: num_hits
+    db.execute(sql_queries['all_album_edge_info'], (1,))
+    all_edge_info = db.fetchall()
+    for edge in all_edge_info:
+        ref_album = edge[0]
+        ref_artist = edge[1]
+        cand_album = edge[2]
+        cand_artist = edge[3]
+        sim_sum = edge[4]
+        num_hits = edge[5]
 
-
-    # given a user specified amount of new tracks to add to the graph, run down each track and figure out the amount of 
-
+        cand_key = f'{cand_album}|{cand_artist}'
+        if f'{cand_album}|{cand_artist}' not in summed_cand_weights:
+            summed_cand_weights[cand_key] = [0, []]
+        sim_score = (sim_sum / num_hits) * (1 + 0.15 * (num_hits - 1))
+        total_edge_score = weights[f'{ref_album}|{ref_artist}'] * sim_score
+        summed_cand_weights[cand_key][0] += total_edge_score
+        summed_cand_weights[cand_key][1].append([ref_album, ref_artist])
+        
+    # sort weights
+    top_albums = heapq.nlargest(10, weights.items(), key=lambda item: item[1][0])
+    
     # outcome: write new rec list to a json file (recs.json)
+    data = {}
+    with open("state.json", "r") as fd:
+        data = json.load(fd)
 
+    data["recs"] = top_albums
+
+    with open("state.json", "w") as fd:
+        json.dump(data, fd)
+
+    
+    con.commit()
     return
 
 

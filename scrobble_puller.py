@@ -67,8 +67,14 @@ def pull_scrobbles(latest_pull_date, client: LastFM, con: sqlite3.Connection, cu
     con.commit()
     con.close()
 
-    # update state file
-    with open("state.json", 'w') as fd:
-        fd.write(json.dumps({"latest_pull":end_date.isoformat()}))
+    data = {}
+
+    with open("state.json", "r") as fd:
+        data = json.load(fd)
+
+    data["latest_pull"] = end_date.isoformat()
+
+    with open("state.json", "w") as fd:
+        json.dump(data, fd)
 
     return end_date
