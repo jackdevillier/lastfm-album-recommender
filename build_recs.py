@@ -114,6 +114,48 @@ def get_latest_pull_date() -> datetime.date:
             json.dump(data, fd)
     return latest_pull_date
 
+def get_recs_from_today():
+    return
+
+def compute_ref_weights(db) -> dict:
+    # get playcounts, latest date for calculations
+    db.execute(sql_queries['albums_by_plays'])
+    scrobbled_albums = db.fetchall()
+    if len(scrobbled_albums) == 0:
+        print("No scrobbles in scrobble table.")
+        exit()
+
+    # log transform the max playcount so we can run it against every other playcount and normalize them on a fairer scale
+    lt_max_pcount = math.log(scrobbled_albums[0][2] + 1)
+
+    # create weights for each album based on PC and recency
+    # key pattern: ["album|artist"]: user_weight 
+    weights = {}
+    for album in scrobbled_albums:
+        pcount = album[2]
+
+        # log transform and normalize playcount
+        lt_pcount = math.log(pcount + 1)
+        norm_pcount = lt_pcount / lt_max_pcount
+
+        # pull date
+        last_played_date = datetime.date.fromisoformat(album[3])
+        days_since = (datetime.date.today() - last_played_date).days
+
+        # date multiplier (A * exp(-k * (x - 1)) + C), A = 1.2, C = 0.2:
+        # no threshold: do nothing (no recency multiplier)
+        # 90-day threshold: k = 0.0045558
+        # 30-day threshold: k = 0.0138
+        # 14-day threshold: k = 0.0312
+        #  7-day threshold: k = 0.0675 (default)
+        # k = 0.0675
+        recency_multiplier = 1.2 * math.exp(-0.0675 * (days_since - 1)) + 0.2
+
+        # compute and store in weights hash
+        final_weight = norm_pcount * recency_multiplier
+        weights[f'{album[0]}|{album[1]}'] = final_weight
+    return weights
+
 '''
 go through ref table and update the playcount of each album/row. currently the assumption is that any ref track entering this function has not been tracked for simlar tracks before
 '''
@@ -199,72 +241,7 @@ def get_similar_albums(ref_track: str, ref_artist: str, ref_album: str, ref_trac
             break
     return res
 
-def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
-    # check state for whether we need to update the graph
-    latest_pull_date = get_latest_pull_date()
-
-    if latest_pull_date == datetime.date.today():
-        # TODO: special case where we just need to return the recommendations previously generated today
-        return
-    
-    new_enddate = pull_scrobbles(latest_pull_date, fm, con, db)
-
-    # clean up uaes (TODO: perform this for every user)
-    db.execute(sql_queries['clean_uaes'], 1)
-
-    # get playcounts, latest date for calculations
-    db.execute(sql_queries['albums_by_plays'])
-    scrobbled_albums = db.fetchall()
-
-    # create weights for each album based on PC and recency
-    if len(scrobbled_albums) == 0:
-        print("No scrobbles in scrobble table.")
-        exit()
-
-    # log transform the max playcount so we can run it against every other playcount and normalize them on a fairer scale
-    lt_max_pcount = math.log(scrobbled_albums[0][2] + 1)
-
-    # key pattern: ["album|artist"]: user_weight 
-    weights = {}
-    for album in scrobbled_albums:
-        pcount = album[2]
-
-        # log transform and normalize playcount
-        lt_pcount = math.log(pcount + 1)
-        norm_pcount = lt_pcount / lt_max_pcount
-
-        # pull date
-        last_played_date = datetime.date.fromisoformat(album[3])
-        days_since = (datetime.date.today() - last_played_date).days
-
-        # date multiplier (A * exp(-k * (x - 1)) + C), A = 1.2, C = 0.2:
-        # no threshold: do nothing (no recency multiplier)
-        # 90-day threshold: k = 0.0045558
-        # 30-day threshold: k = 0.0138
-        # 14-day threshold: k = 0.0312
-        #  7-day threshold: k = 0.0675 (default)
-        # k = 0.0675
-        recency_multiplier = 1.2 * math.exp(-0.0675 * (days_since - 1)) + 0.2
-
-        # compute and store in weights hash
-        final_weight = norm_pcount * recency_multiplier
-        weights[f'{album[0]}|{album[1]}'] = final_weight
-
-    # process all untracked tracks into track table and their respective albums in album table
-    db.execute(sql_queries['untracked_albums'])
-    untracked_albums = db.fetchall()
-    for album in untracked_albums:
-        # update album
-        db.execute("INSERT OR IGNORE INTO album (artist_name, album_name) VALUES (?, ?)", (album[0], album[1]))
-
-    db.execute(sql_queries['untracked_tracks'])
-    untracked_tracks = db.fetchall()
-    for track in untracked_tracks:
-        # function updates album, album_edge, user_album_edge_score, track, and track_edge
-        db.execute("INSERT OR IGNORE INTO track (track_name, album_id) VALUES (?, ?)", (track[1], track[0]))
-        get_similar_albums(track[1], track[0], track[2], db.lastrowid, num_hits=10, fm=fm, con=con, db=db)
-        break
-
+def compute_final_cand_scores(weights, db):
     # with weight list, compile all weights to each candidate album. key: "album|artist", value: [score, array of influence reference albums [[album, artist],...]]
     summed_cand_weights = {}
 
@@ -288,7 +265,46 @@ def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
         summed_cand_weights[cand_key][1].append([ref_album, ref_artist])
         
     # sort weights
-    top_albums = heapq.nlargest(10, weights.items(), key=lambda item: item[1][0])
+    return heapq.nlargest(10, weights.items(), key=lambda item: item[1][0])
+
+def update_graph(db):
+    # process all untracked tracks into track table and their respective albums in album table
+
+    # update album table
+    db.execute(sql_queries['untracked_albums'])
+    untracked_albums = db.fetchall()
+    for album in untracked_albums:
+        db.execute("INSERT OR IGNORE INTO album (artist_name, album_name) VALUES (?, ?)", (album[0], album[1]))
+
+    # update track table, fetch similar tracks/albums for new tracks
+    db.execute(sql_queries['untracked_tracks'])
+    untracked_tracks = db.fetchall()
+    for track in untracked_tracks:
+        # function updates album, album_edge, user_album_edge_score, track, and track_edge
+        db.execute("INSERT OR IGNORE INTO track (track_name, album_id) VALUES (?, ?)", (track[1], track[0]))
+        get_similar_albums(track[1], track[0], track[2], db.lastrowid, num_hits=10, fm=fm, con=con, db=db)
+        break
+
+def build_recs(fm: LastFM, con: sqlite3.Connection, db: sqlite3.Cursor):
+    # check state for whether we need to update the graph
+    latest_pull_date = get_latest_pull_date()
+
+    if latest_pull_date == datetime.date.today():
+        # TODO: special case where we just need to return the recommendations previously generated today
+        get_recs_from_today()
+        return
+    
+    new_enddate = pull_scrobbles(latest_pull_date, fm, con, db)
+
+    # clean up uaes (TODO: perform this for every user)
+    db.execute(sql_queries['clean_uaes'], 1)
+
+    weights = compute_ref_weights(db)
+
+    update_graph(db)
+    
+    # sort weights
+    top_albums = compute_final_cand_scores(weights, db)
     
     # outcome: write new rec list to a json file (recs.json)
     data = {}
